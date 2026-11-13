@@ -6,10 +6,10 @@ use emulator::{
     decision::{
         challenge::{
             prover_execute, prover_final_trace, prover_full_duplex_final_trace,
-            prover_full_duplex_stage,
-            prover_get_hashes_and_step, prover_get_hashes_for_round, verifier_check_execution,
-            verifier_choose_challenge, verifier_choose_challenge_for_read_challenge,
-            verifier_choose_segment, verifier_full_duplex_stage, ForceChallenge, ForceCondition,
+            prover_full_duplex_stage, prover_get_hashes_and_step, prover_get_hashes_for_round,
+            verifier_check_execution, verifier_choose_challenge,
+            verifier_choose_challenge_for_read_challenge, verifier_choose_segment,
+            verifier_full_duplex_stage, ForceChallenge, ForceCondition,
         },
         nary_search::NArySearchType,
     },

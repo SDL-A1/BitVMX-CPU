@@ -212,6 +212,41 @@ impl MemoryTree {
         }
     }
 
+    /// Set many words at once, rebuilding each affected level once instead
+    /// of walking a full path per word.
+    ///
+    /// Loading an ELF writes every initialised word of every section, and
+    /// those words are contiguous, so they share almost all of their
+    /// ancestors.  Updating them one at a time costs `depth` compressions
+    /// each; doing it by level costs one per distinct node actually
+    /// affected, which for a contiguous run is close to the size of the run
+    /// rather than `depth` times it.
+    pub fn bulk_write<I: IntoIterator<Item = (u32, u32)>>(&mut self, items: I) {
+        let mut touched: BTreeSet<u32> = BTreeSet::new();
+        for (index, word) in items {
+            assert!(
+                (index as u64) < self.word_count(),
+                "word index {index} outside a depth-{} tree",
+                self.depth
+            );
+            if word == 0 {
+                self.words.remove(&index);
+            } else {
+                self.words.insert(index, word);
+            }
+            self.set(0, index, leaf(word));
+            touched.insert(index);
+        }
+        for level in 0..self.depth {
+            let parents: BTreeSet<u32> = touched.iter().map(|&i| i >> 1).collect();
+            for &j in parents.iter() {
+                let node = parent(&self.node(level, 2 * j), &self.node(level, 2 * j + 1));
+                self.set(level + 1, j, node);
+            }
+            touched = parents;
+        }
+    }
+
     fn set(&mut self, level: u8, index: u32, node: Node) {
         if node == empty_node(level) {
             self.nodes.remove(&(level, index));
@@ -799,5 +834,63 @@ mod cross_check {
             proof.compute_root(&[(31, 0xcafe_babe)]).map(|r| hex(&r)),
             Some("4a8bd32caa72513360aaeae9994e4a540358a327".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_write_agrees_with_writing_one_at_a_time() {
+        let items: Vec<(u32, u32)> = (0..500u32)
+            .map(|i| (i, i.wrapping_mul(2_654_435_761)))
+            .collect();
+        let mut one_by_one = MemoryTree::new(DEPLOYED_DEPTH);
+        for &(i, w) in &items {
+            one_by_one.write(i, w);
+        }
+        let mut bulk = MemoryTree::new(DEPLOYED_DEPTH);
+        bulk.bulk_write(items.iter().copied());
+        assert_eq!(bulk.root(), one_by_one.root());
+        for &(i, w) in &items {
+            assert_eq!(bulk.read(i), w);
+        }
+    }
+
+    #[test]
+    fn bulk_write_handles_scattered_sections_and_zeros() {
+        // Three runs far apart, as a loaded ELF leaves them: code low, data
+        // in the middle, registers at the top of the address space.
+        let mut items: Vec<(u32, u32)> = Vec::new();
+        for base in [0x0000_0400u32, 0x0004_0000, 0x3C00_0000] {
+            for k in 0..64u32 {
+                items.push((base + k, if k % 7 == 0 { 0 } else { base ^ k }));
+            }
+        }
+        let mut one_by_one = MemoryTree::new(DEPLOYED_DEPTH);
+        for &(i, w) in &items {
+            one_by_one.write(i, w);
+        }
+        let mut bulk = MemoryTree::new(DEPLOYED_DEPTH);
+        bulk.bulk_write(items.iter().copied());
+        assert_eq!(bulk.root(), one_by_one.root());
+
+        // And a proof taken from the bulk-built tree verifies against it.
+        let shape = [0x0000_0400u32, 0x0004_0000, 0x3C00_0000, 0x3C00_0001];
+        let proof = bulk.multiproof(&shape);
+        assert!(verify_multiproof(&bulk.root(), &proof));
+    }
+
+    #[test]
+    fn bulk_write_is_incremental() {
+        let mut tree = MemoryTree::new(DEPLOYED_DEPTH);
+        tree.bulk_write([(1u32, 10u32), (2, 20)]);
+        let after_first = tree.root();
+        tree.bulk_write([(3u32, 30u32)]);
+        let mut expected = MemoryTree::new(DEPLOYED_DEPTH);
+        expected.bulk_write([(1u32, 10u32), (2, 20), (3, 30)]);
+        assert_eq!(tree.root(), expected.root());
+        assert_ne!(after_first, tree.root());
     }
 }

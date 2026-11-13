@@ -1289,14 +1289,20 @@ mod base_b_tests {
     fn its_digit_is_eight_bits_and_needs_a_range_check() {
         let d = NArySearchDefinition::new(1 << 30, 192);
         assert_eq!(d.bits_nary(), 8, "192 fits in eight bits");
-        assert!(d.digit_needs_range_check(1), "but not every eight-bit value is a digit");
+        assert!(
+            d.digit_needs_range_check(1),
+            "but not every eight-bit value is a digit"
+        );
 
         // Which no power-of-two dissection needs, so nothing existing
         // grows a check it did not have.
         for nary in [2u8, 4, 8, 16, 32, 64, 128] {
             let p = NArySearchDefinition::new(1 << 20, nary);
             for round in 1..=p.total_rounds() {
-                assert!(!p.digit_needs_range_check(round), "nary={nary} round={round}");
+                assert!(
+                    !p.digit_needs_range_check(round),
+                    "nary={nary} round={round}"
+                );
             }
         }
     }
@@ -1344,7 +1350,9 @@ mod base_b_tests {
     fn the_admissible_branching_factors_all_work() {
         // Those for which ceil((b-1)/3) is a power of two: states pack
         // three to a 64-byte FlatMerkle element.
-        for b in [11u8, 12, 13, 23, 24, 25, 47, 48, 49, 95, 96, 97, 191, 192, 193] {
+        for b in [
+            11u8, 12, 13, 23, 24, 25, 47, 48, 49, 95, 96, 97, 191, 192, 193,
+        ] {
             let d = NArySearchDefinition::new(1 << 20, b);
             assert_eq!(d.nary, b);
             assert!(d.max_steps >= 1 << 20, "b={b}");
