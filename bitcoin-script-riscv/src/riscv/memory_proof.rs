@@ -318,3 +318,76 @@ mod tests {
         }
     }
 }
+
+/// Sizing the scripts a dispute can put on chain.
+///
+/// These are measurements, not estimates: each script is built by the same
+/// code the protocol builds it with, and its length read off.  What they
+/// feed is the worst-case weight comparison between BitVMX as it stands and
+/// the compact construction.
+#[cfg(test)]
+mod script_sizes {
+    use crate::riscv::challenges::*;
+    use crate::riscv::memory_proof::{memory_leaf_challenge, memory_node_challenge};
+    use bitcoin_script_stack::stack::StackTracker;
+    use bitvmx_cpu_definitions::memory_tree::MemoryModel;
+
+    fn size(name: &str, f: impl Fn(&mut StackTracker)) -> (String, usize, u32) {
+        let mut stack = StackTracker::new();
+        f(&mut stack);
+        (
+            name.to_string(),
+            stack.get_script().len(),
+            stack.get_max_stack_size(),
+        )
+    }
+
+    #[test]
+    fn report_every_challenge_script_size() {
+        let mut rows = vec![
+            size("trace_hash (last_step, 33 B)", |s| {
+                trace_hash_challenge(s, MemoryModel::LastStep)
+            }),
+            size("trace_hash (merkle, 53 B)", |s| {
+                trace_hash_challenge(s, MemoryModel::Merkle)
+            }),
+            size("trace_hash_zero (last_step)", |s| {
+                trace_hash_zero_challenge(s, MemoryModel::LastStep)
+            }),
+            size("trace_hash_zero (merkle)", |s| {
+                trace_hash_zero_challenge(s, MemoryModel::Merkle)
+            }),
+            size("program_counter (last_step)", |s| {
+                program_counter_challenge(s, MemoryModel::LastStep)
+            }),
+            size("program_counter (merkle)", |s| {
+                program_counter_challenge(s, MemoryModel::Merkle)
+            }),
+            size("correct_hash (last_step)", |s| {
+                correct_hash_challenge(s, MemoryModel::LastStep)
+            }),
+            size("correct_hash (merkle)", |s| {
+                correct_hash_challenge(s, MemoryModel::Merkle)
+            }),
+            size("read_value (last_step only)", read_value_challenge),
+            size("future_read (last_step only)", future_read_challenge),
+            size("halt", halt_challenge),
+            size("equivocation_hash", equivocation_hash_challenge),
+            size("memory_node (merkle only)", memory_node_challenge),
+            size("memory_leaf (merkle only)", memory_leaf_challenge),
+        ];
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+
+        println!(
+            "\n{:<32} {:>10} {:>12}",
+            "challenge script", "bytes", "peak stack"
+        );
+        println!("{}", "-".repeat(56));
+        for (name, bytes, peak) in &rows {
+            println!("{name:<32} {bytes:>10} {peak:>12}");
+        }
+        let biggest = rows.iter().max_by_key(|r| r.1).unwrap();
+        println!("\nlargest: {} at {} bytes", biggest.0, biggest.1);
+        assert!(biggest.1 > 0);
+    }
+}

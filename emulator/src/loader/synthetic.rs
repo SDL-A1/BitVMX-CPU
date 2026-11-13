@@ -545,8 +545,7 @@ mod memory_model_yaml_tests {
         // The seam that makes the backend swappable: a program definition
         // asks for a memory model and the loaded Program has it, without
         // anything in between having to be told.
-        let prog =
-            SyntheticProgram::new_with_memory_model(4, 8, 128, MemoryModel::Merkle).unwrap();
+        let prog = SyntheticProgram::new_with_memory_model(4, 8, 128, MemoryModel::Merkle).unwrap();
         let text = std::fs::read_to_string(prog.definition()).unwrap();
         assert!(
             text.contains("memory_model: merkle"),
