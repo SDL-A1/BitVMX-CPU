@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::{
     decision::nary_search::{NArySearchDefinition, SearchMode},
+    decision::publication::PublicationMedium,
     executor::{
         fetcher::{execute_program, FullTrace},
         utils::FailConfiguration,
@@ -41,6 +42,14 @@ pub struct ProgramDefinition {
     /// their current behaviour.
     #[serde(default)]
     pub search_mode: SearchMode,
+    /// How a stage's dissection reaches the chain.
+    ///
+    /// Independent of `search_mode`: the search decides who sends what and
+    /// when, this decides how the hashes are carried. Defaults to
+    /// committed, so existing program definitions keep their current
+    /// behaviour here too.
+    #[serde(default)]
+    pub publication: PublicationMedium,
     pub max_steps: u64,
     pub input_section_name: String,
     pub inputs: Vec<InputDefinition>,
@@ -59,6 +68,21 @@ impl ProgramDefinition {
 
     pub fn search_mode(&self) -> SearchMode {
         self.search_mode
+    }
+
+    pub fn publication(&self) -> PublicationMedium {
+        self.publication
+    }
+
+    /// Bytes of dissection one stage carries, before any framing.
+    ///
+    /// Twenty-byte state hashes, `nary - 1` of them. Only meaningful
+    /// where the dissection is published; a committed one is priced by
+    /// its commitment scheme and not by its size.
+    pub fn dissection_bytes(&self, round: u8) -> Option<usize> {
+        self.publication
+            .is_published()
+            .then(|| self.nary_def().hashes_for_round(round) as usize * 20)
     }
 
     pub fn load_program(&self) -> Result<Program, EmulatorError> {
@@ -266,4 +290,93 @@ fn parse_config<T: for<'a> Deserialize<'a>>(config: &str) -> Result<T, ProgramDe
     config
         .try_deserialize::<T>()
         .map_err(ProgramDefinitionError::ConfigFileError)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn definition(extra: &str) -> ProgramDefinition {
+        let dir = std::env::temp_dir().join(format!("pubdef-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("d-{}.yaml", extra.len()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "elf: hello-world.elf\n\
+             nary_search: 8\n\
+             max_steps: 2000\n\
+             input_section_name: .input\n\
+             inputs:\n\
+             \x20 - size: 4\n\
+             \x20   owner: prover\n\
+             {extra}"
+        )
+        .unwrap();
+        ProgramDefinition::from_config(path.to_str().unwrap()).unwrap()
+    }
+
+    /// The property that makes this a backend choice rather than a new
+    /// protocol: a definition that says nothing about publication means
+    /// exactly what it meant before.
+    #[test]
+    fn an_existing_definition_is_unchanged() {
+        let d = definition("");
+        assert_eq!(d.publication(), PublicationMedium::Committed);
+        assert_eq!(d.search_mode(), SearchMode::Asymmetric);
+        assert_eq!(d.dissection_bytes(1), None);
+    }
+
+    #[test]
+    fn the_two_choices_are_independent() {
+        let d = definition("search_mode: full-duplex\npublication: op-return\n");
+        assert_eq!(d.search_mode(), SearchMode::FullDuplex);
+        assert_eq!(d.publication(), PublicationMedium::OpReturn);
+
+        let d = definition("publication: annex\n");
+        assert_eq!(d.search_mode(), SearchMode::Asymmetric, "still the default");
+        assert_eq!(d.publication(), PublicationMedium::Annex);
+    }
+
+    #[test]
+    fn a_published_dissection_is_twenty_bytes_a_hash() {
+        let d = definition("publication: op-return\n");
+        let n = d.nary_def();
+        for round in 1..=n.total_rounds() {
+            assert_eq!(
+                d.dissection_bytes(round),
+                Some(n.hashes_for_round(round) as usize * 20)
+            );
+        }
+        // nary = 8, so seven hashes a full round.
+        assert_eq!(d.dissection_bytes(1), Some(140));
+    }
+
+    /// At the branching factor the publication exists to buy.
+    #[test]
+    fn a_192_ary_stage_publishes_3820_bytes() {
+        let dir = std::env::temp_dir().join(format!("pubdef192-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d192.yaml");
+        std::fs::write(
+            &path,
+            "elf: hello-world.elf\n\
+             nary_search: 192\n\
+             search_mode: full-duplex\n\
+             publication: annex\n\
+             max_steps: 1073741824\n\
+             input_section_name: .input\n\
+             inputs:\n\
+             \x20 - size: 4\n\
+             \x20   owner: prover\n",
+        )
+        .unwrap();
+        let d = ProgramDefinition::from_config(path.to_str().unwrap()).unwrap();
+        let n = d.nary_def();
+        assert_eq!(n.total_rounds(), 4, "four narrowing levels");
+        assert_eq!(n.hashes_for_round(1), 191);
+        assert_eq!(d.dissection_bytes(1), Some(191 * 20));
+        assert_eq!(d.dissection_bytes(1), Some(3820));
+    }
 }
