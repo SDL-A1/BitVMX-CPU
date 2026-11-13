@@ -50,6 +50,32 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use bitcoin_hashes::{sha256, Hash};
+use serde::{Deserialize, Serialize};
+
+/// How a dispute justifies that a read returned the value it claims.
+///
+/// These are alternatives, not layers: a trace carries one or the other.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryModel {
+    /// A read names the step that last wrote its address, and disputing
+    /// that claim opens a second search to that step.  This is BitVMX's
+    /// original scheme and remains the default, so an existing program
+    /// definition means exactly what it meant before.
+    #[default]
+    LastStep,
+    /// A read is opened against a Merkle root that the machine state hash
+    /// commits to.  The compact endgame's model: one hash check against a
+    /// root, and no second search.
+    Merkle,
+}
+
+impl MemoryModel {
+    /// Whether the machine state hash chains the memory root.
+    pub fn chains_root(&self) -> bool {
+        matches!(self, MemoryModel::Merkle)
+    }
+}
 
 /// Depth of the deployed tree: one leaf per word of the 32-bit address
 /// space, which is the only depth that can hold BitVMX's memory map.

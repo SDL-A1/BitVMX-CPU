@@ -69,6 +69,7 @@ pub fn get_new_program() -> Program {
         register_sections: SectionDefinition::default(),
         code_sections: SectionDefinition::default(),
         memory_tree: MemoryTree::default(),
+        memory_model: Default::default(),
     }
 }
 

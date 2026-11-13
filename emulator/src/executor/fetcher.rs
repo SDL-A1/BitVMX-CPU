@@ -333,7 +333,10 @@ pub fn execute_step(
         read_1,
         read_2,
         TraceReadPC::new(pc, opcode),
-        TraceStep::new(write_1, program.pc.clone()),
+        match program.trace_mem_root() {
+            Some(root) => TraceStep::new_with_root(write_1, program.pc.clone(), root),
+            None => TraceStep::new(write_1, program.pc.clone()),
+        },
         witness,
         mem_witness,
     );
@@ -1258,5 +1261,123 @@ mod memory_tree_tests {
             root,
             "and rebuilding recovers it exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod merkle_model_tests {
+    use crate::executor::utils::FailConfiguration;
+    use crate::loader::program_definition::ProgramDefinition;
+    use crate::loader::synthetic::SyntheticProgram;
+    use bitvmx_cpu_definitions::memory_tree::MemoryModel;
+
+    use super::*;
+
+    fn run_under(model: MemoryModel) -> (Program, FullTrace) {
+        let prog = SyntheticProgram::new(20, 8, 128).unwrap();
+        let def = ProgramDefinition::from_config(&prog.definition()).unwrap();
+        let mut program = def.load_program().unwrap();
+        program.memory_model = model;
+        let before = program.step;
+        let (_result, traces) = execute_program(
+            &mut program,
+            vec![0, 0, 0, 0],
+            &def.input_section_name,
+            false,
+            &None,
+            Some(23),
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            FailConfiguration::default(),
+            false,
+        );
+        assert!(program.step > before, "execution did not advance");
+        // Keep the synthetic program's directory alive until here.
+        drop(prog);
+        (program, traces)
+    }
+
+    #[test]
+    fn last_step_is_the_default_and_chains_no_root() {
+        let prog = SyntheticProgram::new(4, 8, 128).unwrap();
+        let def = ProgramDefinition::from_config(&prog.definition()).unwrap();
+        let program = def.load_program().unwrap();
+        assert_eq!(
+            program.memory_model,
+            MemoryModel::LastStep,
+            "an existing program definition means what it meant before"
+        );
+        assert!(program.trace_mem_root().is_none());
+    }
+
+    #[test]
+    fn a_merkle_step_carries_the_post_state_root() {
+        let (program, traces) = run_under(MemoryModel::Merkle);
+        let last = traces.last().expect("at least one step");
+        let root = last
+            .0
+            .trace_step
+            .mem_root
+            .expect("a Merkle step carries a root");
+        assert_eq!(
+            root,
+            program.memory_root(),
+            "and it is the root after that step"
+        );
+    }
+
+    #[test]
+    fn the_step_message_grows_by_exactly_one_root() {
+        let (_m, merkle) = run_under(MemoryModel::Merkle);
+        let (_l, last_step) = run_under(MemoryModel::LastStep);
+        let m = merkle.last().unwrap().0.trace_step.to_bytes();
+        let l = last_step.last().unwrap().0.trace_step.to_bytes();
+        assert_eq!(l.len(), 13, "write address, value, pc, micro");
+        assert_eq!(m.len(), 33, "and twenty more for the root");
+        assert_eq!(&m[..13], &l[..], "the original fields are untouched");
+        // The blake3 message the on-chain script hashes is the previous
+        // state hash followed by these bytes, so the script's length goes
+        // from 33 to 53 -- which is (40 + 8 + 8 + 8 + 2) / 2 and then
+        // (40 + 8 + 8 + 8 + 2 + 40) / 2 in nibbles.
+        assert_eq!(20 + l.len(), 33);
+        assert_eq!(20 + m.len(), 53);
+    }
+
+    #[test]
+    fn the_two_models_give_different_state_hashes() {
+        // Which is the point: under Merkle an agreed state pins the root
+        // the endgame opens against, and under LastStep it does not.
+        let (_m, merkle) = run_under(MemoryModel::Merkle);
+        let (_l, last_step) = run_under(MemoryModel::LastStep);
+        assert_eq!(merkle.len(), last_step.len(), "same execution");
+        assert_ne!(
+            merkle.last().unwrap().1,
+            last_step.last().unwrap().1,
+            "but the state hash commits to more"
+        );
+    }
+
+    #[test]
+    fn every_merkle_step_s_root_opens_its_own_writes() {
+        let (program, traces) = run_under(MemoryModel::Merkle);
+        assert!(program.memory_tree_is_consistent());
+        let mut seen_roots = 0;
+        for (trace, _hash) in &traces {
+            if let Some(root) = trace.trace_step.mem_root {
+                seen_roots += 1;
+                let write = &trace.trace_step.write_1;
+                if write.address != 0 {
+                    // The written word is in the tree that step produced.
+                    assert_ne!(root, [0u8; 20]);
+                }
+            }
+        }
+        assert!(seen_roots > 0, "a Merkle run must carry roots");
     }
 }

@@ -1,3 +1,4 @@
+use bitvmx_cpu_definitions::memory_tree::MemoryModel;
 use bitvmx_cpu_definitions::trace::{hash_to_string, TraceRWStep};
 use config::Config;
 use serde::Deserialize;
@@ -50,6 +51,14 @@ pub struct ProgramDefinition {
     /// behaviour here too.
     #[serde(default)]
     pub publication: PublicationMedium,
+    /// How a dispute justifies that a read returned the value it claims.
+    ///
+    /// Defaults to `last_step`, BitVMX's original scheme, so existing
+    /// program definitions keep their current behaviour. `merkle` selects
+    /// the compact endgame's model, where the state hash chains a memory
+    /// root and a read is opened against it.
+    #[serde(default)]
+    pub memory_model: MemoryModel,
     pub max_steps: u64,
     pub input_section_name: String,
     pub inputs: Vec<InputDefinition>,
@@ -74,6 +83,10 @@ impl ProgramDefinition {
         self.publication
     }
 
+    pub fn memory_model(&self) -> MemoryModel {
+        self.memory_model
+    }
+
     /// Bytes of dissection one stage carries, before any framing.
     ///
     /// Twenty-byte state hashes, `nary - 1` of them. Only meaningful
@@ -89,7 +102,9 @@ impl ProgramDefinition {
         //extract the path from config path and concat with elf
         let elf_path = self.config_path.split("/").collect::<Vec<&str>>();
         let elf_file = format!("{}/{}", elf_path[..elf_path.len() - 1].join("/"), self.elf);
-        load_elf(&elf_file, false)
+        let mut program = load_elf(&elf_file, false)?;
+        program.memory_model = self.memory_model;
+        Ok(program)
     }
 
     pub fn load_program_from_checkpoint(

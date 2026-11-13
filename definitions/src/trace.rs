@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use crate::memory::MemoryWitness;
+use crate::memory_tree::Node;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
@@ -83,11 +84,36 @@ impl TraceWrite {
 pub struct TraceStep {
     pub write_1: TraceWrite,
     pub write_pc: ProgramCounter,
+    /// The memory root *after* this step, under [`MemoryModel::Merkle`].
+    ///
+    /// `None` under `LastStep`, where memory is not Merkelized and the
+    /// state hash commits only to the write.  Keeping it optional is what
+    /// lets the two models produce byte-identical hashes for the trace
+    /// they share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_root: Option<Node>,
 }
 
 impl TraceStep {
     pub fn new(write_1: TraceWrite, write_pc: ProgramCounter) -> TraceStep {
-        TraceStep { write_1, write_pc }
+        TraceStep {
+            write_1,
+            write_pc,
+            mem_root: None,
+        }
+    }
+
+    /// A step under [`MemoryModel::Merkle`], carrying the post-state root.
+    pub fn new_with_root(
+        write_1: TraceWrite,
+        write_pc: ProgramCounter,
+        mem_root: Node,
+    ) -> TraceStep {
+        TraceStep {
+            write_1,
+            write_pc,
+            mem_root: Some(mem_root),
+        }
     }
 
     pub fn new_step(
@@ -99,6 +125,7 @@ impl TraceStep {
         TraceStep {
             write_1: TraceWrite::new(write_address, write_value),
             write_pc: ProgramCounter::new(program_counter, micro),
+            mem_root: None,
         }
     }
 
@@ -115,6 +142,13 @@ impl TraceStep {
         bytes.extend(&self.write_1.value.to_be_bytes());
         bytes.extend(&self.write_pc.get_address().to_be_bytes());
         bytes.push(self.write_pc.get_micro());
+        // Under Merkle memory the state hash chains the post-state root, so
+        // that an agreed state pins the root the endgame opens against.
+        // Thirty-three bytes becomes fifty-three; under LastStep nothing is
+        // appended and the hash is what it always was.
+        if let Some(root) = &self.mem_root {
+            bytes.extend(root);
+        }
         bytes
     }
 }

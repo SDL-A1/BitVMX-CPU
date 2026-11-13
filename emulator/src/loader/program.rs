@@ -6,7 +6,7 @@ use bitcoin_script_riscv::riscv::instruction_mapping::{
 use bitvmx_cpu_definitions::{
     constants::LAST_STEP_INIT,
     memory::{Chunk, MemoryAccessType, SectionDefinition},
-    memory_tree::{leaf_index, MemoryTree, Node, DEPLOYED_DEPTH},
+    memory_tree::{leaf_index, MemoryModel, MemoryTree, Node, DEPLOYED_DEPTH},
     trace::{generate_initial_step_hash, ProgramCounter, TraceRead, TraceWrite},
 };
 use elf::{abi::SHF_EXECINSTR, abi::SHF_WRITE, endian::LittleEndian, ElfBytes};
@@ -208,6 +208,10 @@ pub struct Program {
     /// agree.
     #[serde(skip)]
     pub memory_tree: MemoryTree,
+    /// How this program's dispute justifies a read.  Defaults to
+    /// `LastStep`, so an existing program definition means what it did.
+    #[serde(default)]
+    pub memory_model: MemoryModel,
 }
 
 impl Program {
@@ -272,12 +276,24 @@ impl Program {
             register_sections: SectionDefinition::default(),
             code_sections: SectionDefinition::default(),
             memory_tree: MemoryTree::new(DEPLOYED_DEPTH),
+            memory_model: MemoryModel::default(),
         }
     }
 
     /// The root of memory as it stands.
     pub fn memory_root(&self) -> Node {
         self.memory_tree.root()
+    }
+
+    /// The post-state root to put in a trace step, if this program's model
+    /// chains one.
+    ///
+    /// The *initial* root is not chained: the first state hash predates any
+    /// step.  It does not need to be, because step zero's state is agreed
+    /// by construction -- both parties load the same program and the same
+    /// input, and the setup commits to both.
+    pub fn trace_mem_root(&self) -> Option<Node> {
+        self.memory_model.chains_root().then(|| self.memory_root())
     }
 
     /// Rebuild the memory tree from the section data and the register file,
