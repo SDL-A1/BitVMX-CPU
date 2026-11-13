@@ -31,6 +31,16 @@ impl FromStr for NArySearchType {
     }
 }
 
+/// Bits needed to carry a digit in base `radix`: a ceiling, so a
+/// non-power-of-two radix gets the next whole number of bits and a range
+/// check rather than a wider digit.
+fn bits_for_radix(radix: u64) -> u8 {
+    if radix <= 1 {
+        return 0;
+    }
+    (u64::BITS - (radix - 1).leading_zeros()) as u8
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NArySearchDefinition {
     pub max_steps: u64,
@@ -40,33 +50,108 @@ pub struct NArySearchDefinition {
 }
 
 impl NArySearchDefinition {
+    /// The search over a trace of at least `aprox_max_steps` steps,
+    /// dissected `nary` ways at each round.
+    ///
+    /// A step index is a **mixed-radix** number: `full_rounds` digits in
+    /// base `nary`, and where that overshoots, one final digit in the
+    /// smaller base `nary_last_round`.  The radices multiply to
+    /// `max_steps`, so the digits address every step exactly once --
+    /// `radix_tests::the_radices_multiply_to_the_trace_length`.
+    ///
+    /// `nary` need not be a power of two.  It was required to be while the
+    /// arithmetic below was written with shifts and masks, which is the
+    /// same arithmetic only when each radix is a power of two.  Compact
+    /// BitVMX II dissects 192 ways -- states pack three to a 64-byte
+    /// FlatMerkle element, so the admissible branching factors are those
+    /// with `ceil((b-1)/3)` a power of two, and no such `b` is itself one.
     pub fn new(aprox_max_steps: u64, nary: u8) -> NArySearchDefinition {
-        assert!(nary > 1 && nary.count_ones() == 1);
-        let max_bits = f64::ceil(f64::log2(aprox_max_steps as f64));
-        let max_steps = 2f64.powi(max_bits as i32) as u64;
-        let nary_bits = f64::log2(nary as f64);
-        let full_rounds = f64::floor(max_bits / nary_bits);
-        let bits_left = max_bits - full_rounds * nary_bits;
-        let nary_last_round = if bits_left as u8 == 0 {
-            0
-        } else {
-            f64::powf(2.0, bits_left) as u8
-        };
+        assert!(nary > 1, "a dissection needs at least two parts");
+        let target = aprox_max_steps.max(1);
+
+        if nary.count_ones() == 1 {
+            // A power-of-two dissection pads the trace to a power of two
+            // and splits it into `log2(nary)`-bit digits, with whatever
+            // bits are left over becoming a smaller final radix -- itself
+            // a power of two.  Keeping this exactly is what lets the
+            // change below land without moving any existing search: a
+            // 2,000-step trace still runs at 2,048 and not 4,096.
+            let max_bits = f64::ceil(f64::log2(target as f64));
+            let max_steps = 2f64.powi(max_bits as i32) as u64;
+            let nary_bits = f64::log2(nary as f64);
+            let full_rounds = f64::floor(max_bits / nary_bits);
+            let bits_left = max_bits - full_rounds * nary_bits;
+            let nary_last_round = if bits_left as u8 == 0 {
+                0
+            } else {
+                f64::powf(2.0, bits_left) as u8
+            };
+
+            return NArySearchDefinition {
+                max_steps,
+                nary,
+                full_rounds: full_rounds as u8,
+                nary_last_round,
+            };
+        }
+
+        // Otherwise there is no power of two to pad to, so the trace pads
+        // to `nary^rounds` and every round carries a full digit.  This is
+        // the shape Compact BitVMX II specifies, and it is why that paper
+        // quotes `192^4 = 1,358,954,496` rather than `2^30`.
+        let n = nary as u64;
+        let mut full_rounds = 0u8;
+        let mut max_steps = 1u64;
+        while max_steps < target {
+            max_steps = max_steps.saturating_mul(n);
+            full_rounds += 1;
+        }
 
         NArySearchDefinition {
             max_steps,
             nary,
-            full_rounds: full_rounds as u8,
-            nary_last_round,
+            full_rounds: full_rounds.max(1),
+            nary_last_round: 0,
         }
     }
 
+    /// The base of the digit decided at `round`, counting rounds from 1.
+    pub fn radix_for_round(&self, round: u8) -> u64 {
+        if round <= self.full_rounds {
+            self.nary as u64
+        } else {
+            self.nary_last_round as u64
+        }
+    }
+
+    /// How many steps one unit of `round`'s digit is worth: the product of
+    /// the radices of the rounds below it.
+    pub fn place_value(&self, round: u8) -> u64 {
+        ((round + 1)..=self.total_rounds())
+            .map(|r| self.radix_for_round(r))
+            .product()
+    }
+
+    /// Bits needed to carry a base-`nary` digit.
+    ///
+    /// A ceiling, not an exact logarithm: a base-192 digit occupies eight
+    /// bits and a range check that it is below 192, which is what the
+    /// deployed protocol already does for its base-8 digit in two
+    /// Winternitz nibbles.
     pub fn bits_nary(&self) -> u8 {
-        f64::log2(self.nary as f64) as u8
+        bits_for_radix(self.nary as u64)
     }
 
     pub fn bits_last_round(&self) -> u8 {
-        f64::log2(self.nary_last_round as f64) as u8
+        bits_for_radix(self.nary_last_round as u64)
+    }
+
+    /// Whether a digit of this round can overflow its bits, and so needs a
+    /// range check on chain.  False for every power-of-two radix, which is
+    /// every radix the deployed protocol uses.
+    pub fn digit_needs_range_check(&self, round: u8) -> bool {
+        let r = self.radix_for_round(round);
+        r > 1 && !r.is_power_of_two()
     }
 
     pub fn total_rounds(&self) -> u8 {
@@ -110,23 +195,11 @@ impl NArySearchDefinition {
     // if we are on the last round, the number of bits required is the bits_last_round()
     // the step number should be masked and shifted apropiately
     pub fn step_bits_for_round(&self, round: u8, step: u64) -> u32 {
-        if round <= self.full_rounds {
-            let shift = (self.full_rounds - round) * self.bits_nary() + self.bits_last_round();
-            let mask = ((self.nary - 1) as u64) << shift;
-            ((step & mask) >> shift) as u32
-        } else {
-            let mask = (self.nary_last_round - 1) as u64;
-            (step & mask) as u32
-        }
+        ((step / self.place_value(round)) % self.radix_for_round(round)) as u32
     }
 
     pub fn step_from_base_and_bits(&self, round: u8, base: u64, bits: u32) -> u64 {
-        if round <= self.full_rounds {
-            let shift = (self.full_rounds - round) * self.bits_nary() + self.bits_last_round();
-            base + ((bits as u64) << shift)
-        } else {
-            base + (bits as u64)
-        }
+        base + bits as u64 * self.place_value(round)
     }
 
     pub fn step_mapping(&self, bits: &[u32]) -> HashMap<u64, (u8, u8)> {
@@ -151,8 +224,8 @@ impl NArySearchDefinition {
         decision_bits
             .iter()
             .enumerate()
-            .fold(0, |res, (round, bits)| {
-                (res << self.bits_for_round(round as u8 + 1)) + *bits as u64
+            .fold(0, |res, (round, digit)| {
+                res + *digit as u64 * self.place_value(round as u8 + 1)
             })
     }
 }
@@ -1069,5 +1142,213 @@ mod tests {
         test_step_from_all_bits_aux(2000, 8, &vec![4, 2, 4, 1], 1105);
         test_step_from_all_bits_aux(2000, 8, &vec![4, 2, 4, 2], 1106);
         test_step_from_all_bits_aux(2000, 8, &vec![4, 2, 4, 3], 1107);
+    }
+}
+
+#[cfg(test)]
+mod radix_tests {
+    use super::*;
+
+    /// Every definition the bit-sliced construction admits, as a fixture for
+    /// the mixed-radix rewrite: whatever that changes, it must not change
+    /// these.
+    fn definitions() -> Vec<NArySearchDefinition> {
+        let mut out = Vec::new();
+        for nary in [2u8, 4, 8, 16, 32, 64, 128] {
+            for steps in [16u64, 100, 1_000, 2_000, 65_536, 1 << 20] {
+                out.push(NArySearchDefinition::new(steps, nary));
+            }
+        }
+        out
+    }
+
+    /// A step index is a mixed-radix number: `full_rounds` digits in base
+    /// `nary`, then one in base `nary_last_round` where the bits did not
+    /// divide evenly.  The place value of a round is the product of the
+    /// radices of the rounds below it.
+    fn radix(d: &NArySearchDefinition, round: u8) -> u64 {
+        if round <= d.full_rounds {
+            d.nary as u64
+        } else {
+            d.nary_last_round as u64
+        }
+    }
+
+    fn place_value(d: &NArySearchDefinition, round: u8) -> u64 {
+        ((round + 1)..=d.total_rounds())
+            .map(|r| radix(d, r))
+            .product()
+    }
+
+    #[test]
+    fn digit_extraction_is_mixed_radix() {
+        for d in definitions() {
+            for step in [0u64, 1, 7, 63, d.max_steps / 3, d.max_steps - 1] {
+                for round in 1..=d.total_rounds() {
+                    let shifted = d.step_bits_for_round(round, step);
+                    let by_radix = (step / place_value(&d, round)) % radix(&d, round);
+                    assert_eq!(
+                        shifted as u64, by_radix,
+                        "nary={} steps={} round={} step={}",
+                        d.nary, d.max_steps, round, step
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruction_is_mixed_radix() {
+        for d in definitions() {
+            for round in 1..=d.total_rounds() {
+                for digit in [0u32, 1, (radix(&d, round) - 1) as u32] {
+                    let shifted = d.step_from_base_and_bits(round, 0, digit);
+                    let by_radix = digit as u64 * place_value(&d, round);
+                    assert_eq!(shifted, by_radix, "nary={} round={}", d.nary, round);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_radices_multiply_to_the_trace_length() {
+        for d in definitions() {
+            let product: u64 = (1..=d.total_rounds()).map(|r| radix(&d, r)).product();
+            assert_eq!(
+                product, d.max_steps,
+                "nary={} steps={}: the digits must address every step exactly once",
+                d.nary, d.max_steps
+            );
+        }
+    }
+
+    #[test]
+    fn a_dissection_cuts_the_interval_into_radix_parts() {
+        for d in definitions() {
+            for round in 1..=d.total_rounds() {
+                let steps = d.required_steps(round, 0);
+                assert_eq!(
+                    steps.len() as u64,
+                    radix(&d, round) - 1,
+                    "round {} of nary={} publishes radix-1 interior points",
+                    round,
+                    d.nary
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_digit_round_trips_through_the_whole_search() {
+        for d in definitions() {
+            let digits: Vec<u32> = (1..=d.total_rounds())
+                .map(|r| ((radix(&d, r) - 1) / 2) as u32)
+                .collect();
+            let step = d.step_from_decision_bits(&digits);
+            for (i, round) in (1..=d.total_rounds()).enumerate() {
+                assert_eq!(
+                    d.step_bits_for_round(round, step),
+                    digits[i],
+                    "nary={} round={}",
+                    d.nary,
+                    round
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod base_b_tests {
+    use super::*;
+
+    /// Compact BitVMX II dissects 192 ways.  Nothing about that is a
+    /// power of two, which is the whole reason the arithmetic above is
+    /// mixed-radix rather than shifts and masks.
+    #[test]
+    fn a_192_ary_search_covers_a_billion_steps_in_four_rounds() {
+        let d = NArySearchDefinition::new(1 << 30, 192);
+        assert_eq!(d.nary, 192);
+        assert_eq!(d.total_rounds(), 4);
+        assert_eq!(d.nary_last_round, 0, "every round carries a full digit");
+        assert_eq!(d.max_steps, 192u64.pow(4));
+        assert_eq!(d.max_steps, 1_358_954_496);
+        assert!(d.max_steps >= 1 << 30);
+    }
+
+    #[test]
+    fn a_192_ary_round_publishes_191_interior_states() {
+        let d = NArySearchDefinition::new(1 << 30, 192);
+        for round in 1..=d.total_rounds() {
+            assert_eq!(d.hashes_for_round(round), 191);
+            assert_eq!(d.required_steps(round, 0).len(), 191);
+        }
+    }
+
+    #[test]
+    fn its_digit_is_eight_bits_and_needs_a_range_check() {
+        let d = NArySearchDefinition::new(1 << 30, 192);
+        assert_eq!(d.bits_nary(), 8, "192 fits in eight bits");
+        assert!(d.digit_needs_range_check(1), "but not every eight-bit value is a digit");
+
+        // Which no power-of-two dissection needs, so nothing existing
+        // grows a check it did not have.
+        for nary in [2u8, 4, 8, 16, 32, 64, 128] {
+            let p = NArySearchDefinition::new(1 << 20, nary);
+            for round in 1..=p.total_rounds() {
+                assert!(!p.digit_needs_range_check(round), "nary={nary} round={round}");
+            }
+        }
+    }
+
+    /// The property the whole search rests on: a step is its digits, and
+    /// its digits are the step.
+    #[test]
+    fn every_step_round_trips_through_its_digits() {
+        for nary in [8u8, 12, 192, 193] {
+            let d = NArySearchDefinition::new(100_000, nary);
+            for step in [0u64, 1, 2, 999, d.max_steps / 7, d.max_steps - 1] {
+                let digits: Vec<u32> = (1..=d.total_rounds())
+                    .map(|r| d.step_bits_for_round(r, step))
+                    .collect();
+                for (i, r) in (1..=d.total_rounds()).enumerate() {
+                    assert!(
+                        (digits[i] as u64) < d.radix_for_round(r),
+                        "nary={nary} round={r}: digit out of range"
+                    );
+                }
+                assert_eq!(
+                    d.step_from_decision_bits(&digits),
+                    step,
+                    "nary={nary} step={step}"
+                );
+            }
+        }
+    }
+
+    /// Dissection points divide the interval exactly, which a base-b
+    /// padding guarantees and a power-of-two padding would not.
+    #[test]
+    fn the_dissection_points_divide_the_interval() {
+        let d = NArySearchDefinition::new(1 << 30, 192);
+        assert_eq!(d.max_steps % 192, 0);
+        let steps = d.required_steps(1, 0);
+        let first = steps[0];
+        assert_eq!(first, d.max_steps / 192);
+        for (i, s) in steps.iter().enumerate() {
+            assert_eq!(*s, (i as u64 + 1) * first, "evenly spaced");
+        }
+    }
+
+    #[test]
+    fn the_admissible_branching_factors_all_work() {
+        // Those for which ceil((b-1)/3) is a power of two: states pack
+        // three to a 64-byte FlatMerkle element.
+        for b in [11u8, 12, 13, 23, 24, 25, 47, 48, 49, 95, 96, 97, 191, 192, 193] {
+            let d = NArySearchDefinition::new(1 << 20, b);
+            assert_eq!(d.nary, b);
+            assert!(d.max_steps >= 1 << 20, "b={b}");
+            assert_eq!(d.hashes_for_round(1), b - 1, "b={b}");
+        }
     }
 }
