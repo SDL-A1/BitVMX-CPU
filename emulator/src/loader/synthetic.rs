@@ -7,6 +7,7 @@
 //! temporary directory instead, which exercises the real loader, executor and
 //! checkpointing rather than standing in for them.
 
+use bitvmx_cpu_definitions::memory_tree::MemoryModel;
 use std::fs;
 use std::path::PathBuf;
 
@@ -175,6 +176,17 @@ pub struct SyntheticProgram {
 impl SyntheticProgram {
     /// Writes a program of `instructions` arithmetic steps plus a clean exit.
     pub fn new(instructions: usize, nary: u8, max_steps: u64) -> std::io::Result<Self> {
+        Self::new_with_memory_model(instructions, nary, max_steps, MemoryModel::LastStep)
+    }
+
+    /// A synthetic program under a chosen memory model, so the YAML seam
+    /// that selects one is exercised rather than assumed.
+    pub fn new_with_memory_model(
+        instructions: usize,
+        nary: u8,
+        max_steps: u64,
+        memory_model: MemoryModel,
+    ) -> std::io::Result<Self> {
         let unique = format!(
             "bitvmx-synthetic-{}-{}",
             std::process::id(),
@@ -197,10 +209,16 @@ impl SyntheticProgram {
                  nary_search: {}\n\
                  max_steps: {}\n\
                  input_section_name: .input\n\
+                 memory_model: {}\n\
                  inputs:\n\
                  \x20 - size: 4\n\
                  \x20   owner: prover\n",
-                nary, max_steps
+                nary,
+                max_steps,
+                match memory_model {
+                    MemoryModel::LastStep => "last_step",
+                    MemoryModel::Merkle => "merkle",
+                }
             ),
         )?;
         Ok(Self { dir })
@@ -506,5 +524,50 @@ mod search_tests {
                 diverge_at - 1
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_model_yaml_tests {
+    use super::*;
+    use crate::loader::program_definition::ProgramDefinition;
+
+    #[test]
+    fn a_definition_without_the_field_means_last_step() {
+        let prog = SyntheticProgram::new(4, 8, 128).unwrap();
+        let def = ProgramDefinition::from_config(&prog.definition()).unwrap();
+        assert_eq!(def.memory_model(), MemoryModel::LastStep);
+        assert!(!def.memory_model().chains_root());
+    }
+
+    #[test]
+    fn merkle_travels_from_the_yaml_to_the_loaded_program() {
+        // The seam that makes the backend swappable: a program definition
+        // asks for a memory model and the loaded Program has it, without
+        // anything in between having to be told.
+        let prog =
+            SyntheticProgram::new_with_memory_model(4, 8, 128, MemoryModel::Merkle).unwrap();
+        let text = std::fs::read_to_string(prog.definition()).unwrap();
+        assert!(
+            text.contains("memory_model: merkle"),
+            "the yaml says it: {text}"
+        );
+        let def = ProgramDefinition::from_config(&prog.definition()).unwrap();
+        assert_eq!(def.memory_model(), MemoryModel::Merkle);
+
+        let program = def.load_program().unwrap();
+        assert_eq!(program.memory_model, MemoryModel::Merkle);
+        assert!(program.trace_mem_root().is_some(), "and it chains a root");
+        assert!(program.memory_tree_is_consistent());
+    }
+
+    #[test]
+    fn last_step_travels_too_and_chains_nothing() {
+        let prog =
+            SyntheticProgram::new_with_memory_model(4, 8, 128, MemoryModel::LastStep).unwrap();
+        let def = ProgramDefinition::from_config(&prog.definition()).unwrap();
+        assert_eq!(def.memory_model(), MemoryModel::LastStep);
+        let program = def.load_program().unwrap();
+        assert!(program.trace_mem_root().is_none());
     }
 }

@@ -958,6 +958,22 @@ pub fn verifier_choose_challenge(
         });
     }
 
+    // Everything below disputes a `last_step` pointer: that a read names a
+    // step in the future, that it names the wrong writer, that it claims an
+    // uninitialised word was initialised or the reverse.  Under Merkle
+    // memory there is no pointer to dispute.  A read is opened against the
+    // root the state hash commits to, and a false one is caught by the
+    // endgame's multiproof check rather than by a second search, so these
+    // six branches are unreachable and the function stops here.
+    //
+    // Nothing is lost by stopping: a read that returns the wrong value
+    // feeds the wrong write, which gives the wrong state hash, which is
+    // what the search is already looking for.  The search still arrives at
+    // the faulty step; what changes is only how that step is adjudicated.
+    if program.memory_model.chains_root() {
+        return Ok(ChallengeType::No);
+    }
+
     let prover_read_step_1 = prover_read_1.last_step;
     let prover_read_step_2 = prover_read_2.last_step;
 

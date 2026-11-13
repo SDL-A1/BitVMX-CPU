@@ -116,6 +116,17 @@ impl TraceStep {
         }
     }
 
+    /// Which memory model this step was produced under.
+    ///
+    /// A step carrying a root is a Merkle step; the trace says which model
+    /// it belongs to, so a verifier never has to be told separately.
+    pub fn memory_model(&self) -> crate::memory_tree::MemoryModel {
+        match self.mem_root {
+            Some(_) => crate::memory_tree::MemoryModel::Merkle,
+            None => crate::memory_tree::MemoryModel::LastStep,
+        }
+    }
+
     pub fn new_step(
         write_address: u32,
         write_value: u32,
