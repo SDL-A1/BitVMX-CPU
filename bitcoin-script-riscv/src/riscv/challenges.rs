@@ -5017,3 +5017,75 @@ mod merkle_state_hash_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod challenge_size_measurements {
+    //! What each challenge script measures, built through the
+    //! implementation's own StackTracker.
+    //!
+    //! These are the challenge *predicates* only.  A real tapscript leaf
+    //! is the Winternitz verification of the values the predicate reads,
+    //! plus this.  The commitment side is measured separately in
+    //! compact2/measurements/dissection_leaf_bytes.rs.
+    use super::*;
+    use bitcoin_script_stack::stack::StackTracker;
+
+    fn size(f: impl FnOnce(&mut StackTracker)) -> usize {
+        let mut s = StackTracker::new();
+        f(&mut s);
+        s.get_script().len()
+    }
+
+    #[test]
+    fn challenge_script_bytes() {
+        let m = MemoryModel::LastStep;
+        let rows: Vec<(&str, usize)> = vec![
+            ("entry_point", size(|s| entry_point_challenge(s, 0x8000_0000))),
+            ("input", size(|s| input_challenge(s, 0xA000_0000))),
+            ("rom", size(|s| rom_challenge(s, 0x8000_0000, 0x1234))),
+            ("program_counter", size(|s| program_counter_challenge(s, m))),
+            ("halt", size(|s| halt_challenge(s))),
+            ("trace_hash", size(|s| trace_hash_challenge(s, m))),
+            ("trace_hash_zero", size(|s| trace_hash_zero_challenge(s, m))),
+            ("read_value", size(|s| read_value_challenge(s))),
+            ("correct_hash", size(|s| correct_hash_challenge(s, m))),
+            ("future_read", size(|s| future_read_challenge(s))),
+            ("equivocation_hash", size(|s| equivocation_hash_challenge(s))),
+            ("verifier_equivocation", size(|s| verifier_equivocation_challenge(s, 2, 3))),
+        ];
+        println!("\n{:<24} {:>10}", "challenge", "script B");
+        let mut total = 0;
+        for (name, n) in &rows {
+            println!("{:<24} {:>10}", name, n);
+            total += n;
+        }
+        println!("{:<24} {:>10}", "--- largest", rows.iter().map(|r| r.1).max().unwrap());
+        println!("{:<24} {:>10}", "--- measured", rows.len());
+        let _ = total;
+    }
+
+    #[test]
+    fn memory_model_changes_the_challenges() {
+        for (name, f) in [
+            ("program_counter", 0),
+            ("trace_hash", 1),
+            ("trace_hash_zero", 2),
+            ("correct_hash", 3),
+        ] {
+            let last = size(|s| match f {
+                0 => program_counter_challenge(s, MemoryModel::LastStep),
+                1 => trace_hash_challenge(s, MemoryModel::LastStep),
+                2 => trace_hash_zero_challenge(s, MemoryModel::LastStep),
+                _ => correct_hash_challenge(s, MemoryModel::LastStep),
+            });
+            let merkle = size(|s| match f {
+                0 => program_counter_challenge(s, MemoryModel::Merkle),
+                1 => trace_hash_challenge(s, MemoryModel::Merkle),
+                2 => trace_hash_zero_challenge(s, MemoryModel::Merkle),
+                _ => correct_hash_challenge(s, MemoryModel::Merkle),
+            });
+            println!("{:<20} LastStep={:>8}  Merkle={:>8}  delta={:>+8}",
+                     name, last, merkle, merkle as i64 - last as i64);
+        }
+    }
+}
